@@ -1,209 +1,248 @@
-;; Privacy Protection Contract
-;; Ensures quantum surveillance privacy compliance and data protection
+;; Response Coordination Contract
+;; Manages quantum security responses and incident coordination
 
 (define-constant contract-owner tx-sender)
-(define-constant err-unauthorized (err u400))
-(define-constant err-policy-not-found (err u401))
-(define-constant err-consent-required (err u402))
-(define-constant err-data-not-found (err u403))
-(define-constant err-retention-expired (err u404))
+(define-constant err-unauthorized (err u500))
+(define-constant err-incident-not-found (err u501))
+(define-constant err-response-not-found (err u502))
+(define-constant err-invalid-priority (err u503))
+(define-constant err-invalid-status (err u504))
 
-;; Privacy levels
-(define-constant privacy-public u1)
-(define-constant privacy-restricted u2)
-(define-constant privacy-confidential u3)
-(define-constant privacy-classified u4)
+;; Priority levels
+(define-constant priority-low u1)
+(define-constant priority-medium u2)
+(define-constant priority-high u3)
+(define-constant priority-critical u4)
+
+;; Incident status
+(define-constant status-open u1)
+(define-constant status-investigating u2)
+(define-constant status-responding u3)
+(define-constant status-resolved u4)
+(define-constant status-closed u5)
+
+;; Response types
+(define-constant response-automated u1)
+(define-constant response-manual u2)
+(define-constant response-escalated u3)
 
 ;; Data structures
-(define-map privacy-policies
-  { policy-id: uint }
+(define-map security-incidents
+  { incident-id: uint }
   {
-    creator-id: principal,
-    name: (string-ascii 64),
-    data-retention-period: uint,
-    encryption-level: uint,
-    access-restrictions: (string-ascii 128),
-    compliance-framework: (string-ascii 64),
+    reporter-id: principal,
+    threat-id: (optional uint),
+    incident-type: (string-ascii 32),
+    priority: uint,
+    status: uint,
+    affected-systems: (string-ascii 256),
+    description: (string-ascii 512),
     created-at: uint,
-    active: bool
+    updated-at: uint
   }
 )
 
-(define-map data-access-logs
-  { access-id: uint }
+(define-map response-actions
+  { response-id: uint }
   {
-    accessor-id: principal,
-    data-hash: (buff 32),
-    access-type: (string-ascii 32),
-    purpose: (string-ascii 128),
-    timestamp: uint,
-    authorized: bool
+    incident-id: uint,
+    responder-id: principal,
+    action-type: (string-ascii 64),
+    response-method: uint,
+    action-description: (string-ascii 256),
+    executed-at: uint,
+    success: bool,
+    notes: (string-ascii 256)
   }
 )
 
-(define-map user-consents
-  { user-id: principal, policy-id: uint }
+(define-map response-teams
+  { team-id: uint }
   {
-    consent-given: bool,
-    consent-timestamp: uint,
-    expiry-timestamp: (optional uint),
-    consent-hash: (buff 32)
+    team-name: (string-ascii 64),
+    lead-responder: principal,
+    specialization: (string-ascii 64),
+    active-incidents: uint,
+    response-time-avg: uint,
+    success-rate: uint
   }
 )
 
-(define-map encrypted-data
-  { data-id: uint }
+(define-map incident-timeline
+  { incident-id: uint, event-id: uint }
   {
-    owner-id: principal,
-    data-hash: (buff 32),
-    encryption-key-hash: (buff 32),
-    privacy-level: uint,
-    created-at: uint,
-    retention-until: uint,
-    access-count: uint
+    event-type: (string-ascii 32),
+    event-description: (string-ascii 128),
+    actor-id: principal,
+    timestamp: uint
   }
 )
 
-(define-data-var next-policy-id uint u1)
-(define-data-var next-access-id uint u1)
-(define-data-var next-data-id uint u1)
+(define-data-var next-incident-id uint u1)
+(define-data-var next-response-id uint u1)
+(define-data-var next-team-id uint u1)
 
-;; Create a privacy policy
-(define-public (create-privacy-policy
-  (name (string-ascii 64))
-  (data-retention-period uint)
-  (encryption-level uint)
-  (access-restrictions (string-ascii 128))
-  (compliance-framework (string-ascii 64))
+;; Create a security incident
+(define-public (create-incident
+  (threat-id (optional uint))
+  (incident-type (string-ascii 32))
+  (priority uint)
+  (affected-systems (string-ascii 256))
+  (description (string-ascii 512))
 )
-  (let ((policy-id (var-get next-policy-id)))
-    (map-set privacy-policies
-      { policy-id: policy-id }
+  (let ((incident-id (var-get next-incident-id)))
+    (asserts! (<= priority priority-critical) err-invalid-priority)
+    (asserts! (>= priority priority-low) err-invalid-priority)
+    (map-set security-incidents
+      { incident-id: incident-id }
       {
-        creator-id: tx-sender,
-        name: name,
-        data-retention-period: data-retention-period,
-        encryption-level: encryption-level,
-        access-restrictions: access-restrictions,
-        compliance-framework: compliance-framework,
+        reporter-id: tx-sender,
+        threat-id: threat-id,
+        incident-type: incident-type,
+        priority: priority,
+        status: status-open,
+        affected-systems: affected-systems,
+        description: description,
         created-at: block-height,
-        active: true
+        updated-at: block-height
       }
     )
-    (var-set next-policy-id (+ policy-id u1))
-    (ok policy-id)
+    ;; Log incident creation
+    (log-incident-event incident-id u0 "incident-created" "Security incident reported")
+    (var-set next-incident-id (+ incident-id u1))
+    (ok incident-id)
   )
 )
 
-;; Give consent to a privacy policy
-(define-public (give-consent
-  (policy-id uint)
-  (expiry-blocks (optional uint))
+;; Execute response action
+(define-public (execute-response
+  (incident-id uint)
+  (action-type (string-ascii 64))
+  (response-method uint)
+  (action-description (string-ascii 256))
+  (success bool)
+  (notes (string-ascii 256))
 )
   (let (
-    (policy (unwrap! (map-get? privacy-policies { policy-id: policy-id }) err-policy-not-found))
-    (expiry-timestamp (match expiry-blocks
-      blocks (some (+ block-height blocks))
-      none
-    ))
+    (response-id (var-get next-response-id))
+    (incident (unwrap! (map-get? security-incidents { incident-id: incident-id }) err-incident-not-found))
   )
-    (map-set user-consents
-      { user-id: tx-sender, policy-id: policy-id }
+    (map-set response-actions
+      { response-id: response-id }
       {
-        consent-given: true,
-        consent-timestamp: block-height,
-        expiry-timestamp: expiry-timestamp,
-        consent-hash: (keccak256 (concat (unwrap-panic (to-consensus-buff? tx-sender)) (unwrap-panic (to-consensus-buff? policy-id))))
+        incident-id: incident-id,
+        responder-id: tx-sender,
+        action-type: action-type,
+        response-method: response-method,
+        action-description: action-description,
+        executed-at: block-height,
+        success: success,
+        notes: notes
       }
     )
+    ;; Update incident status if not already responding
+    (if (is-eq (get status incident) status-open)
+      (map-set security-incidents
+        { incident-id: incident-id }
+        (merge incident
+          {
+            status: status-responding,
+            updated-at: block-height
+          }
+        )
+      )
+      true
+    )
+    ;; Log response action
+    (log-incident-event incident-id response-id "response-executed" action-type)
+    (var-set next-response-id (+ response-id u1))
+    (ok response-id)
+  )
+)
+
+;; Update incident status
+(define-public (update-incident-status (incident-id uint) (new-status uint))
+  (let ((incident (unwrap! (map-get? security-incidents { incident-id: incident-id }) err-incident-not-found)))
+    (asserts! (<= new-status status-closed) err-invalid-status)
+    (asserts! (>= new-status status-open) err-invalid-status)
+    (map-set security-incidents
+      { incident-id: incident-id }
+      (merge incident
+        {
+          status: new-status,
+          updated-at: block-height
+        }
+      )
+    )
+    ;; Log status change
+    (log-incident-event incident-id u0 "status-updated" "Incident status changed")
     (ok true)
   )
 )
 
-;; Store encrypted data
-(define-public (store-encrypted-data
-  (data-hash (buff 32))
-  (encryption-key-hash (buff 32))
-  (privacy-level uint)
-  (retention-blocks uint)
+;; Register response team
+(define-public (register-response-team
+  (team-name (string-ascii 64))
+  (specialization (string-ascii 64))
 )
-  (let ((data-id (var-get next-data-id)))
-    (map-set encrypted-data
-      { data-id: data-id }
+  (let ((team-id (var-get next-team-id)))
+    (map-set response-teams
+      { team-id: team-id }
       {
-        owner-id: tx-sender,
-        data-hash: data-hash,
-        encryption-key-hash: encryption-key-hash,
-        privacy-level: privacy-level,
-        created-at: block-height,
-        retention-until: (+ block-height retention-blocks),
-        access-count: u0
+        team-name: team-name,
+        lead-responder: tx-sender,
+        specialization: specialization,
+        active-incidents: u0,
+        response-time-avg: u0,
+        success-rate: u100
       }
     )
-    (var-set next-data-id (+ data-id u1))
-    (ok data-id)
+    (var-set next-team-id (+ team-id u1))
+    (ok team-id)
   )
 )
 
-;; Log data access
-(define-public (log-data-access
-  (data-hash (buff 32))
-  (access-type (string-ascii 32))
-  (purpose (string-ascii 128))
-  (authorized bool)
+;; Helper function to log incident events
+(define-private (log-incident-event
+  (incident-id uint)
+  (event-id uint)
+  (event-type (string-ascii 32))
+  (event-description (string-ascii 128))
 )
-  (let ((access-id (var-get next-access-id)))
-    (map-set data-access-logs
-      { access-id: access-id }
-      {
-        accessor-id: tx-sender,
-        data-hash: data-hash,
-        access-type: access-type,
-        purpose: purpose,
-        timestamp: block-height,
-        authorized: authorized
-      }
-    )
-    (var-set next-access-id (+ access-id u1))
-    (ok access-id)
-  )
-)
-
-;; Check if user has given consent
-(define-read-only (has-user-consent (user-id principal) (policy-id uint))
-  (match (map-get? user-consents { user-id: user-id, policy-id: policy-id })
-    consent (and
-      (get consent-given consent)
-      (match (get expiry-timestamp consent)
-        expiry (> expiry block-height)
-        true
-      )
-    )
-    false
-  )
-)
-
-;; Check if data retention period has expired
-(define-read-only (is-data-retention-expired (data-id uint))
-  (match (map-get? encrypted-data { data-id: data-id })
-    data (>= block-height (get retention-until data))
-    true
+  (map-set incident-timeline
+    { incident-id: incident-id, event-id: event-id }
+    {
+      event-type: event-type,
+      event-description: event-description,
+      actor-id: tx-sender,
+      timestamp: block-height
+    }
   )
 )
 
 ;; Read-only functions
-(define-read-only (get-privacy-policy (policy-id uint))
-  (map-get? privacy-policies { policy-id: policy-id })
+(define-read-only (get-incident (incident-id uint))
+  (map-get? security-incidents { incident-id: incident-id })
 )
 
-(define-read-only (get-encrypted-data (data-id uint))
-  (map-get? encrypted-data { data-id: data-id })
+(define-read-only (get-response-action (response-id uint))
+  (map-get? response-actions { response-id: response-id })
 )
 
-(define-read-only (get-access-log (access-id uint))
-  (map-get? data-access-logs { access-id: access-id })
+(define-read-only (get-response-team (team-id uint))
+  (map-get? response-teams { team-id: team-id })
 )
 
-(define-read-only (get-user-consent (user-id principal) (policy-id uint))
-  (map-get? user-consents { user-id: user-id, policy-id: policy-id })
+(define-read-only (get-incident-event (incident-id uint) (event-id uint))
+  (map-get? incident-timeline { incident-id: incident-id, event-id: event-id })
+)
+
+(define-read-only (get-incidents-by-priority (priority uint))
+  ;; In a real implementation, this would filter incidents by priority
+  ;; For simplicity, we return the next incident ID
+  (var-get next-incident-id)
+)
+
+(define-read-only (get-next-incident-id)
+  (var-get next-incident-id)
 )
